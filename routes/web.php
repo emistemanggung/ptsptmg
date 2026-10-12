@@ -108,11 +108,6 @@ Route::middleware(['auth'])->group(function () {
         Route::resource('persyaratan', PersyaratanController::class)->only(['index', 'show']);
 
         Route::get('permohonan', [PermohonanController::class, 'index'])->name('permohonan.index');
-        // Daftar Permohonan — tabel berisi SEMUA data permohonan lintas seksi,
-        // terpisah dari "Permohonan Terbaru" (card view) di atas supaya
-        // petugas punya tampilan ringkas untuk memantau antrean dan tampilan
-        // tabel untuk menyisir/mencari data secara menyeluruh.
-        Route::get('permohonan-daftar', [PermohonanController::class, 'daftarPetugas'])->name('permohonan.daftar');
         Route::get('permohonan/{permohonan}', [PermohonanController::class, 'show'])->name('permohonan.show');
         Route::get('permohonan/{permohonan}/pdf', [PermohonanController::class, 'downloadPdf'])->name('permohonan.pdf');
 
@@ -138,13 +133,7 @@ Route::middleware(['auth'])->group(function () {
 
     // Petugas Seksi routes — tindak lanjut permohonan yang didisposisikan ke seksinya
     Route::middleware(['role:petugas_seksi'])->prefix('seksi')->name('seksi.')->group(function () {
-        // Layanan seksi sendiri — petugas seksi mengelola konten layanan
-        // (deskripsi, persyaratan, standar pelayanan) untuk layanan yang
-        // seksi_id-nya seksi ini. Otorisasi per-layanan dicek di controller.
-        Route::resource('layanan', \App\Http\Controllers\SeksiLayananController::class)->only(['index', 'show', 'edit', 'update']);
-
         Route::get('permohonan', [PermohonanController::class, 'index'])->name('permohonan.index');
-        Route::get('permohonan-daftar', [PermohonanController::class, 'daftarSeksi'])->name('permohonan.daftar');
         Route::get('permohonan/{permohonan}', [PermohonanController::class, 'show'])->name('permohonan.show');
         Route::get('permohonan/{permohonan}/pdf', [PermohonanController::class, 'downloadPdf'])->name('permohonan.pdf');
 
@@ -184,6 +173,17 @@ Route::middleware(['auth'])->group(function () {
 
     // Shared routes
     Route::get('dashboard', [DashboardController::class, 'index'])->name('dashboard');
+});
+
+// --- Webhook dari Layanan Madrasah ---
+// Server-to-server, tanpa session/CSRF (dikecualikan di bootstrap/app.php),
+// diamankan dengan header X-Webhook-Secret + opsional X-Webhook-Signature.
+Route::prefix('webhook')->middleware(['verify.webhook', 'throttle:60,1'])->group(function () {
+    Route::post('permohonan/tiket', [App\Http\Controllers\WebhookController::class, 'receiveTiket'])
+        ->name('webhook.permohonan.tiket');
+
+    Route::post('permohonan/rekomendasi', [App\Http\Controllers\WebhookController::class, 'updateRekomendasi'])
+        ->name('webhook.permohonan.rekomendasi');
 });
 
 require __DIR__.'/auth.php';

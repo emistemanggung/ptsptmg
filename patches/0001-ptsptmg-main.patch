@@ -1,0 +1,1389 @@
+From 511f2b5b2872b437386ac0faa9b1be0389f20949 Mon Sep 17 00:00:00 2001
+From: emistemanggung <emistemanggung@gmail.com>
+Date: Fri, 28 Aug 2026 12:37:24 +0700
+Subject: [PATCH] feat(ptsp): add E2E scripts, webhook verification, and
+ migration for PTSP integration
+
+---
+ HANDOFF_NOTES.md                              | 703 ++++++++++++++++++
+ .../Controllers/PtspIntegrationController.php |  82 ++
+ .../Middleware/VerifyPtspWebhookSecret.php    |  55 ++
+ app/Models/LayananRekomendasi.php             |  14 +
+ bootstrap/app.php                             |  17 +-
+ config/auth.php                               |   5 +
+ config/services.php                           |   6 +
+ ..._columns_to_layanan_rekomendasis_table.php |  50 ++
+ .../views/admin/monitor_layanan.blade.php     |   2 +
+ .../partials/_ptsp_ticket_buttons.blade.php   |  85 +++
+ routes/web-snippet.php                        |  17 +
+ routes/web.php                                |  13 +
+ scripts/run_upload_rekom.php                  |  38 +
+ tests/Unit/PtspIntegrationJobsTest.php        | 147 ++++
+ 14 files changed, 1232 insertions(+), 2 deletions(-)
+ create mode 100644 HANDOFF_NOTES.md
+ create mode 100644 app/Http/Controllers/PtspIntegrationController.php
+ create mode 100644 app/Http/Middleware/VerifyPtspWebhookSecret.php
+ create mode 100644 database/migrations/2026_08_28_000001_add_ptsp_integration_columns_to_layanan_rekomendasis_table.php
+ create mode 100644 resources/views/admin/partials/_ptsp_ticket_buttons.blade.php
+ create mode 100644 routes/web-snippet.php
+ create mode 100644 scripts/run_upload_rekom.php
+ create mode 100644 tests/Unit/PtspIntegrationJobsTest.php
+
+diff --git a/HANDOFF_NOTES.md b/HANDOFF_NOTES.md
+new file mode 100644
+index 0000000..173a8e8
+--- /dev/null
++++ b/HANDOFF_NOTES.md
+@@ -0,0 +1,703 @@
++# HANDOFF NOTES — Integrasi Webhook Layanan Madrasah ⇄ PTSP Online
++
++Dibuat oleh sesi Claude sebelumnya. Baca file ini dulu sebelum melanjutkan.
++
++> **BACA POIN 7 DULU** — itu ringkasan sesi paling baru (28 Agustus 2026),
++> berisi koreksi terhadap sebagian poin di bawah + status paling akurat
++> tentang apa yang sudah/belum selesai. Poin 1–6 di bawah ini dibiarkan apa
++> adanya dari sesi sebelumnya sebagai riwayat, tapi ada beberapa yang sudah
++> tidak akurat lagi (lihat catatan koreksi di poin 7).
++
++## 1. Struktur paket ini
++
++```
++layanan-madrasah-integration/   -> file BARU/PATCH untuk aplikasi "Layanan Madrasah" (pengirim)
++ptsptmg-integration/            -> file BARU/PATCH untuk aplikasi "PTSP Online" (penerima)
++```
++
++Isinya BUKAN full copy aplikasi (agar ringan), melainkan hanya file yang perlu
++ditambahkan / ditimpa. File yang berakhiran `-snippet.php` atau `-snippet.txt`
++**bukan file final** — isinya harus ditempel manual ke file asli sesuai
++instruksi komentar di dalamnya (lokasi baris disebutkan).
++
++## 2. Keputusan desain penting (WAJIB DIBACA)
++
++### a. Tidak ada tabel `data_layanan`
++Prompt asli menyebut tabel `data_layanan`, tapi setelah database & source code
++diperiksa, aplikasi Layanan Madrasah sebenarnya punya **7 tabel layanan
++terpisah** (lihat `app/Support/LayananWorkflow.php`):
++
++| tipe | tabel | model |
++|---|---|---|
++| rekomendasi | `layanan_rekomendasis` | `LayananRekomendasi` |
++| rekomendasi_kamad | `layanan_rekom_kepalas` | `LayananRekomendasiKamad` |
++| pindah_sekolah | `layanan_pindah` | `LayananPindah` |
++| input_siswa | `layanan_input_siswa` | `LayananInputSiswa` |
++| reaktivasi | `layanan_reaktivasi` | `LayananReaktivasi` |
++| reset_verval | `layanan_reset_verval` | `LayananResetVerval` |
++| salah_tingkat | `layanan_salah_tingkat` | `LayananSalahTingkat` |
++
++**Keputusan yang diambil:** integrasi ini HANYA diterapkan ke
++`layanan_rekomendasis` (tipe `rekomendasi`), karena paling cocok secara makna
++dengan alur "Ticket" + "Unggah Rekom" yang diminta.
++
++**BELUM DIKERJAKAN:** menerapkan pola yang sama ke `layanan_rekom_kepalas`
++(rekomendasi_kamad) dan `layanan_pindah` (pindah_sekolah) — keduanya juga
++punya kolom `status`, `nomor_rekomendasi`, `pdf_path` yang mirip, jadi pola
++migration/Job/Controller di paket ini **tinggal diduplikasi** dengan mengganti
++nama tabel/model. `input_siswa`, `reaktivasi`, `reset_verval`, `salah_tingkat`
++kemungkinan tidak relevan dengan alur PTSP tiket (perlu konfirmasi ke user).
++
++### b. Payload `id_layanan` vs FK `layanan_id` di PTSP
++Payload webhook `id_layanan` (dari LM) adalah **ID lokal LM**
++(`layanan_rekomendasis.id`), BUKAN foreign key ke tabel `layanan` milik PTSP.
++Untuk menghindari salah kaprah, di PTSP disimpan sebagai kolom baru
++`id_layanan_asal` (string), sedangkan `layanan_id` (FK asli tabel `permohonan`)
++diisi otomatis dari `config('services.layanan_madrasah.default_layanan_id')`
++→ **default `26` ("Surat Rekomendasi")** berdasarkan dump SQL yang dilampirkan.
++**Verifikasi ulang nilai ini ke DB production PTSP sebelum go-live.**
++
++### c. Mapping status PTSP
++Tabel `permohonan` di PTSP punya enum status: `diajukan, verifikasi, proses,
++selesai, ditolak` — TIDAK ADA nilai "Rekomendasi Terbit". Keputusan: saat
++webhook Fase 2 masuk, status di-set ke `selesai`. Jika tim PTSP mau label
++status yang lebih spesifik, enum tabel `permohonan` perlu diubah (migration
++tambahan) — belum dikerjakan.
++
++### d. Nomor tiket
++Format `TKT-XXXXXXXXXXXXX` = `TKT-` + 13 karakter acak uppercase
++(`Str::random(13)`), dicek unik via loop `while(...->exists())`. Sudah cukup
++untuk skala kecil-menengah; untuk volume tinggi sebaiknya pertimbangkan
++`Str::ulid()` atau nomor berbasis counter agar tidak ada race condition saat
++dua request submit di waktu yang nyaris bersamaan (saat ini masih ada
++celah race condition kecil antara cek unique dan insert — belum pakai
++`lockForUpdate`/unique DB constraint sebagai pengaman terakhir. **Rekomendasi:
++tambahkan unique index di kolom `no_tiket` sebagai safety net**, lalu tangkap
++`QueryException` untuk retry generate nomor jika terjadi collision).
++
++## 3. Apa yang SUDAH dibuat (lengkap & siap pakai secara logic)
++
++**Layanan Madrasah:**
++- Migration tambah kolom `no_tiket`, `link_drive_rekom`, `status_ptsp`,
++  `ptsp_last_error` di `layanan_rekomendasis`
++- `app/Jobs/RequestTiketPtspJob.php` — Fase 1, tries=5, backoff bertingkat
++- `app/Jobs/UploadRekomPtspJob.php` — Fase 2, tries=5, backoff bertingkat
++- `app/Http/Controllers/PtspIntegrationController.php` — trigger job dari admin_ptsp
++- Snippet route (`routes/web-snippet.php`)
++- `bootstrap/app.php` (full, sudah include pengecualian CSRF `webhook/*`)
++- Middleware `VerifyPtspWebhookSecret` (opsional/belum diaktifkan — lihat poin 4e)
++- Blade partial tombol Ticket/Unggah Rekom + petunjuk cara `@include`
++- `config/services.ptsp-snippet.php` + `env-snippet.txt`
++
++**PTSP Online:**
++- Migration tambah kolom `sumber`, `id_layanan_asal`, `nsm`, `nama_madrasah`,
++  `link_drive_berkas`, `link_drive_rekom` + index di `permohonan`
++- `app/Http/Controllers/WebhookController.php` — `receiveTiket()` (Fase 1,
++  idempoten via `id_layanan_asal`) & `updateRekomendasi()` (Fase 2)
++- `app/Http/Middleware/VerifyLayananMadrasahWebhookSecret.php`
++- `app/Models/Permohonan.php` (patched, fillable + scope)
++- Snippet route (`routes/web-snippet.php`)
++- `bootstrap/app.php` (REKONSTRUKSI — lihat poin 4a, file aslinya tidak ada di zip)
++- `config/services.layanan-madrasah-snippet.php` + `env-snippet.txt`
++
++Semua sudah pakai: `Http` facade, try-catch, `Log::` di setiap jalur gagal,
++constructor property promotion di kedua Job, validasi request, `hash_equals()`
++untuk perbandingan secret token (anti timing-attack).
++
++## 4. Yang BELUM selesai / perlu ditindaklanjuti
++
++a. **`bootstrap/app.php` PTSP tidak ada di file zip yang di-upload user.**
++   File yang dibuat di paket ini adalah rekonstruksi berdasarkan
++   `composer.json` (Laravel 12) & pemakaian `role:xxx` middleware di
++   `routes/web.php`. **Wajib dicek ke project asli** (kemungkinan besar file
++   ini sebenarnya ada tapi tidak ikut ter-zip / ter-`.gitignore`) sebelum
++   file hasil rekonstruksi ini menimpa yang asli — resiko menghapus
++   konfigurasi lain (mis. `withExceptions`, service provider registration,
++   dsb.) yang tidak diketahui dari isi zip.
++
++b. **Migration belum pernah dijalankan/diuji** terhadap database sungguhan.
++   Sandbox ini tidak diberi akses koneksi MySQL untuk `php artisan migrate`,
++   jadi hanya diverifikasi secara manual dengan membaca dump `.sql` yang
++   dilampirkan. Jalankan `php artisan migrate` di environment staging dan
++   cek hasilnya sebelum production.
++
++c. **Queue worker belum di-setup.** Kode mengasumsikan
++   `QUEUE_CONNECTION=database` (atau redis) + ada proses
++   `php artisan queue:work` yang jalan terus (via Supervisor/systemd) di
++   kedua aplikasi. Kalau `QUEUE_CONNECTION=sync`, job akan jalan langsung
++   secara synchronous saat request (tidak benar-benar "di background") —
++   sebaiknya jangan dipakai di production untuk fitur ini.
++
++d. **UI belum dipoles.** Blade snippet baru berupa fungsi dasar (tombol +
++   modal Bootstrap 5), belum ada: indikator loading/polling status job (user
++   harus refresh manual untuk lihat no_tiket muncul), halaman khusus daftar
++   status pengiriman webhook, atau tombol "retry" manual untuk
++   `status_ptsp = 'gagal_kirim'`.
++
++e. **Webhook PTSP→LM (arah balik) belum benar-benar dipakai.** Prompt minta
++   "webhook dua arah", tapi alur bisnis yang dideskripsikan sebenarnya:
++   PTSP membalas SINKRON di response HTTP job (bukan webhook terpisah).
++   Middleware `VerifyPtspWebhookSecret` di sisi LM sudah disiapkan sebagai
++   stub untuk skenario masa depan (mis. PTSP update status manual lalu push
++   balik ke LM), tapi **belum di-routing** — perlu didiskusikan dengan user
++   apakah memang dibutuhkan endpoint webhook masuk tambahan di LM.
++
++f. **Keamanan tambahan yang direkomendasikan tapi belum diimplementasi:**
++   - Rate limiting di endpoint `/webhook/*` (mis. `throttle:60,1`)
++   - IP allowlist (kedua server saling tahu IP masing-masing)
++   - HMAC signature (`X-Webhook-Signature` = `hash_hmac('sha256', $body, $secret)`)
++     sebagai pengganti/tambahan header secret polos, supaya body tidak bisa
++     dimanipulasi tanpa mengubah signature
++   - Idempotency key eksplisit untuk Fase 2 (saat ini idempotensi Fase 1
++     sudah ada via `id_layanan_asal`, tapi Fase 2 — `updateRekomendasi` —
++     belum idempoten kalau job di-retry setelah update pertama sebenarnya
++     berhasil tapi response gagal diterima LM; efeknya cuma re-update ke
++     nilai yang sama sih, jadi risikonya rendah)
++
++g. **Tidak ada automated test** (Feature test untuk WebhookController,
++   Unit test untuk kedua Job dengan `Http::fake()`). Sangat disarankan
++   ditambahkan sebelum production, khususnya test untuk skenario:
++   - PTSP down / timeout → job retry sesuai backoff lalu masuk `failed_jobs`
++   - Token salah → 401
++   - `no_tiket` tidak ditemukan saat Fase 2 → 404
++   - Double-submit Fase 1 → tidak membuat duplikat tiket
++
++h. **Extend ke 6 layanan lain** — lihat poin 2a. Pola file yang sudah dibuat
++   (migration, Job, Controller method, blade partial) bisa dijadikan
++   template; kalau mau di-generalize sekaligus (bukan 1 Job per tipe), bisa
++   refactor Job supaya menerima `$modelClass` sebagai parameter alih-alih
++   hardcode `LayananRekomendasi`.
++
++## 5. Cara pasang (ringkas)
++
++**Layanan Madrasah:**
++1. Copy `app/Jobs/*.php`, `app/Http/Controllers/PtspIntegrationController.php`,
++   `app/Http/Middleware/VerifyPtspWebhookSecret.php` ke project asli
++2. Copy migration ke `database/migrations/`, lalu `php artisan migrate`
++3. Tempel isi `config/services.ptsp-snippet.php` ke `config/services.php`
++4. Tempel isi `routes/web-snippet.php` ke `routes/web.php` (lihat instruksi lokasi)
++5. Timpa/merge `bootstrap/app.php`
++6. Copy `resources/views/admin/partials/_ptsp_ticket_buttons.blade.php`,
++   lalu tambahkan `@include(...)` di `monitor_layanan.blade.php` (lihat komentar di file)
++7. Tambahkan isi `env-snippet.txt` ke `.env`, isi nilai sesungguhnya
++
++**PTSP Online:**
++1. Copy `app/Http/Controllers/WebhookController.php`,
++   `app/Http/Middleware/VerifyLayananMadrasahWebhookSecret.php` ke project asli
++2. Timpa `app/Models/Permohonan.php` (atau merge manual kalau sudah diubah lagi sejak dump ini)
++3. Copy migration ke `database/migrations/`, lalu `php artisan migrate`
++4. Tempel isi `config/services.layanan-madrasah-snippet.php` ke `config/services.php`
++5. Tempel isi `routes/web-snippet.php` ke `routes/web.php`
++6. **Cek dulu apakah `bootstrap/app.php` project asli sudah ada** (lihat poin 4a)
++   sebelum pakai file rekonstruksi di paket ini
++7. Tambahkan isi `env-snippet.txt` ke `.env`, isi nilai sesungguhnya (secret
++   harus SAMA PERSIS dengan punya LM)
++
++## 6. Testing manual cepat (setelah kedua app jalan)
++
++```bash
++# Dari server LM, simulasikan job Fase 1 langsung lewat tinker:
++php artisan tinker
++>>> App\Jobs\RequestTiketPtspJob::dispatchSync(1); // ganti 1 dengan id layanan_rekomendasis yang valid & punya surat_path
++
++# Cek langsung ke PTSP tanpa lewat LM (pastikan middleware jalan):
++curl -X POST https://ptsp.domain/webhook/permohonan/tiket \
++  -H "X-Webhook-Secret: SECRET_SAMA" -H "Content-Type: application/json" \
++  -d '{"id_layanan":999,"nama_madrasah":"MTs Contoh","nsm":"123456789012","link_drive_berkas":"https://drive.google.com/x"}'
++```
++
++## 7. Update sesi lanjutan — 28 Agustus 2026
++
++Sesi ini TIDAK sempat menyelesaikan seluruh poin 4, karena keterbatasan
++jumlah tool-call dalam satu respons. Fokusnya: verifikasi ulang asumsi
++sesi sebelumnya terhadap dump SQL asli, dan menutup satu celah race
++condition. Berikut detailnya.
++
++### a. Koreksi poin 2b — mapping `default_layanan_id = 26` TERVERIFIKASI BENAR
++Dicek langsung ke `db_untuk_ptsptmg-main.sql`: tabel `layanan` id `26` =
++**"Surat Rekomendasi"**. Asumsi sesi sebelumnya sudah tepat, tidak perlu
++diubah. (Masih tetap sebaiknya di-diff sekali lagi ke DB production
++sebelum go-live, kalau-kalau ada perubahan data sejak dump ini dibuat.)
++
++### b. Koreksi poin 2d / 4f — unique index `no_tiket` TERNYATA SUDAH ADA
++Dump SQL menunjukkan tabel `permohonan` pada aplikasi PTSP asli SUDAH
++punya `UNIQUE KEY permohonan_no_tiket_unique`. Jadi rekomendasi "tambahkan
++unique index di kolom no_tiket sebagai safety net" di poin 2d **sudah
++terpasang otomatis** — tidak perlu migration tambahan untuk ini.
++Migration `add_webhook_columns_to_permohonan_table.php` sudah disesuaikan
++(index redundan yang sempat ditambahkan di draf sebelumnya dihapus).
++
++### c. PERBAIKAN BARU: race condition idempotensi Fase 1 (bagian dari poin 4f)
++Ditambahkan:
++- Unique index komposit baru `permohonan_sumber_id_layanan_asal_unique`
++  pada `(sumber, id_layanan_asal)` di migration PTSP — closing celah
++  kecil antara "cek `$existing`" dan "insert baru" di
++  `WebhookController@receiveTiket` saat dua request Fase 1 untuk
++  `id_layanan` yang sama datang nyaris bersamaan.
++- `WebhookController@receiveTiket` sekarang menangkap `QueryException`
++  SQLSTATE 23000 (duplicate entry) di dalam transaksi: kalau terjadi,
++  ambil baris yang berhasil dibuat oleh request lain alih-alih
++  melempar error 500 ke Layanan Madrasah. Ini membuat Fase 1 benar-benar
++  idempoten di level DB, bukan cuma di level aplikasi.
++- **Belum diuji ke MySQL sungguhan** (sandbox tidak ada akses DB) — cek
++  bahwa nama index tidak melebihi batas panjang identifier MySQL (64
++  karakter; `permohonan_sumber_id_layanan_asal_unique` = 42 karakter,
++  aman) dan bahwa migration `up()` berjalan mulus di atas dump yang ada.
++
++### d. Item dari poin 4 (sesi sebelumnya) yang MASIH BELUM DIKERJAKAN
++Semua ini masih persis seperti dituliskan sesi sebelumnya, sesi ini
++belum sempat menyentuhnya:
++- **4a** — `bootstrap/app.php` PTSP hasil rekonstruksi, **wajib dicek**
++  ke project asli sebelum dipakai. (Sesi ini re-verifikasi: benar, tidak
++  ada `bootstrap/app.php` maupun folder `bootstrap/` sama sekali di
++  `ptsptmg-main.zip` yang di-upload — konsisten dengan catatan lama.
++  Composer.json mengonfirmasi Laravel 12 tanpa `Kernel.php`, jadi
++  pendekatan rekonstruksi `bootstrap/app.php` gaya L12 sudah benar
++  secara struktur, tapi isinya tetap perlu dicek manual karena project
++  asli mungkin punya `withExceptions`/provider lain yang tidak
++  diketahui dari isi zip.)
++- **4b** — migration belum pernah dijalankan ke DB sungguhan.
++- **4c** — queue worker belum di-setup (pastikan `QUEUE_CONNECTION`
++  bukan `sync` di production).
++- **4d** — UI belum dipoles (polling status, halaman retry manual).
++- **4e** — webhook arah balik PTSP→LM belum di-routing (perlu
++  konfirmasi ke user apakah memang dibutuhkan).
++- **4f** — SEBAGIAN sudah dikerjakan sesi ini (lihat poin 7c di atas:
++  race condition Fase 1 sudah ditutup). Yang MASIH belum: rate limiting
++  (`throttle:60,1`) di route `/webhook/*`, IP allowlist, HMAC signature
++  (`X-Webhook-Signature`), dan idempotensi eksplisit untuk Fase 2
++  (`updateRekomendasi` — risiko rendah, lihat alasan di poin 4f asli).
++- **4g** — belum ada automated test sama sekali (Feature test
++  `WebhookController`, Unit test kedua Job dengan `Http::fake()`).
++- **4h** — belum di-extend ke `layanan_rekom_kepalas` (rekomendasi_kamad)
++  dan `layanan_pindah` (pindah_sekolah). Pola migration/Job/Controller
++  di paket ini tinggal diduplikasi ganti nama tabel/model — lihat poin
++  2a untuk daftar lengkap 7 tabel layanan.
++
++### e. Saran urutan pengerjaan untuk sesi berikutnya
++Kalau harus pilih prioritas karena keterbatasan tool-call per sesi,
++disarankan urutan ini (dari yang paling murah/berisiko rendah dulu):
++1. Tambahkan rate limiting `throttle:60,1` ke route snippet webhook (5
++   menit kerja, dampak keamanan langsung).
++2. Tambahkan HMAC signature verification sebagai lapisan kedua di kedua
++   middleware (`VerifyLayananMadrasahWebhookSecret` &
++   `VerifyPtspWebhookSecret`) — masih pakai `hash_equals()` yang sudah
++   ada, tinggal tambah header `X-Webhook-Signature`.
++3. Tulis Feature test untuk `WebhookController` (paling tidak untuk 4
++   skenario yang disebut di poin 4g) — ini akan sekalian jadi cara
++   memvalidasi migration & controller tanpa perlu akses MySQL live.
++4. Baru kerjakan poin 4a (verifikasi bootstrap/app.php) & 4h (extend ke
++   2 layanan lain) karena keduanya butuh keputusan/konfirmasi dari user
++   (bukan murni kerja teknis).
++
++### f. File yang diubah sesi ini
++- `ptsptmg-integration/database/migrations/2026_08_28_000001_add_webhook_columns_to_permohonan_table.php`
++- `ptsptmg-integration/app/Http/Controllers/WebhookController.php`
++- `HANDOFF_NOTES.md` (poin ini)
++
++Tidak ada file lain yang disentuh. Semua isi paket dari sesi sebelumnya
++(Job, blade, config, snippet, dsb.) masih persis sama seperti dibuat
++sebelumnya dan belum diverifikasi ulang di sesi ini.
++
++## 8. Update sesi lanjutan — 28 Agustus 2026 (sesi ke-3)
++
++Sesi ini mengerjakan **poin (1) dan (2)** dari saran urutan di poin 7e
++(rate limiting + HMAC signature). Berhenti di sini karena keterbatasan
++jumlah tool-call per respons — **BELUM sempat mengerjakan poin (3)
++Feature test dan poin (4) bootstrap/app.php + extend layanan lain.**
++Semua item itu (poin 4a, 4g, 4h di atas) masih terbuka persis seperti
++sebelumnya.
++
++### a. SELESAI: Rate limiting `throttle:60,1` di route webhook PTSP
++`ptsptmg-integration/routes/web-snippet.php` — grup route
++`/webhook/*` sekarang pakai middleware
++`['verify.webhook', 'throttle:60,1']`. Tidak perlu perubahan lain
++(throttle middleware sudah bawaan Laravel).
++
++### b. SELESAI (sebagian): HMAC signature `X-Webhook-Signature`
++Ditambahkan sebagai **lapisan kedua opsional** (backward-compatible),
++bukan wajib — supaya tidak memutus integrasi yang mungkin sudah
++berjalan pakai secret-only:
++
++- `VerifyLayananMadrasahWebhookSecret.php` (PTSP) & 
++  `VerifyPtspWebhookSecret.php` (LM, stub) — keduanya sekarang cek
++  header `X-Webhook-Signature` **HANYA JIKA header tsb dikirim**
++  (`hash_hmac('sha256', $rawBody, $secret)` dibandingkan via
++  `hash_equals()`). Kalau header kosong, verifikasi signature
++  di-skip (fallback ke secret-only seperti sebelumnya).
++- `RequestTiketPtspJob.php` & `UploadRekomPtspJob.php` (LM) —
++  sekarang menghitung `$rawBody = json_encode($payload)` secara
++  manual lalu mengirim `X-Webhook-Signature` + memakai
++  `->withBody($rawBody, 'application/json')` alih-alih
++  `->post($url, $payload)`, supaya body yang di-hash PERSIS SAMA
++  dengan body yang benar-benar dikirim di wire (menghindari mismatch
++  akibat urutan key/whitespace bila memakai encoder berbeda).
++
++**BELUM SELESAI / perlu ditindaklanjuti terkait poin ini:**
++- **Belum diuji end-to-end** (butuh kedua app benar-benar jalan +
++  saling memanggil). Sandbox ini tidak punya akses menjalankan kedua
++  aplikasi Laravel sekaligus.
++- Verifikasi signature saat ini **opsional** (skip kalau header tidak
++  ada) supaya rollout aman/bertahap. Setelah dipastikan kedua sisi
++  sudah pakai signature, **hapus pengecekan `if (!empty($signatureGiven))`**
++  di kedua middleware supaya signature jadi WAJIB (lihat komentar
++  `CATATAN` di masing-masing file) — ini langkah keamanan lanjutan
++  yang sengaja belum dipaksakan di sesi ini.
++- IP allowlist (bagian dari poin 4f) masih belum dikerjakan sama
++  sekali.
++- Idempotensi eksplisit Fase 2 (`updateRekomendasi`) masih belum
++  dikerjakan (risiko rendah, lihat alasan di poin 4f asli).
++
++### c. Prioritas untuk sesi berikutnya (urutan disarankan, diperbarui)
++1. **Feature test `WebhookController`** (poin 4g / 7e-3) — paling
++   bernilai sekarang karena akan sekaligus memvalidasi migration,
++   middleware secret+signature, dan controller tanpa perlu MySQL
++   live. Skenario minimal: token salah (401), signature salah (401,
++   jika header dikirim), `no_tiket` tidak ditemukan (404),
++   double-submit Fase 1 (tidak duplikat, cek unique index
++   `permohonan_sumber_id_layanan_asal_unique` bekerja).
++2. Unit test kedua Job LM dengan `Http::fake()` — termasuk assert
++   bahwa header `X-Webhook-Signature` terkirim & cocok dengan
++   `hash_hmac('sha256', $rawBody, $secret)`.
++3. Poin 4a — verifikasi `bootstrap/app.php` PTSP hasil rekonstruksi ke
++   project asli (butuh akses project asli / konfirmasi user).
++4. Poin 4h — extend pola ke `layanan_rekom_kepalas` &
++   `layanan_pindah` (butuh konfirmasi user apakah memang diperlukan).
++5. Setelah (1)-(2) lulus di staging: hapus fallback opsional pada
++   signature HMAC (jadikan wajib), lalu tambahkan IP allowlist.
++
++### d. File yang diubah sesi ini
++- `ptsptmg-integration/routes/web-snippet.php`
++- `ptsptmg-integration/app/Http/Middleware/VerifyLayananMadrasahWebhookSecret.php`
++- `layanan-madrasah-integration/app/Http/Middleware/VerifyPtspWebhookSecret.php`
++- `layanan-madrasah-integration/app/Jobs/RequestTiketPtspJob.php`
++- `layanan-madrasah-integration/app/Jobs/UploadRekomPtspJob.php`
++- `HANDOFF_NOTES.md` (poin ini)
++
++Tidak ada file lain yang disentuh. File dari sesi 1 & 2 (migration,
++Controller, blade, config, snippet lain) tidak diverifikasi ulang di
++sesi ini — asumsikan masih seperti dituliskan di poin 3 & 7.
++
++## 9. Update sesi lanjutan — 28 Agustus 2026 (sesi ke-4)
++
++Sesi ini mengerjakan **prioritas (1)-(2) dari poin 8c** (Feature test +
++Unit test) DAN — temuan penting — **menutup celah sinkronisasi** antara
++paket referensi `webhook-integration/` dan project asli
++(`ptsptmg-main.zip` / `layanan-madrasah.zip`). Berhenti di sini lagi
++karena keterbatasan tool-call. Baca sub-poin (a) dulu, itu paling penting.
++
++### a. TEMUAN PENTING: project asli sudah lebih maju dari yang dikira
++
++User meng-upload ulang `ptsptmg-main.zip` dan `layanan-madrasah.zip` (bukan
++cuma dump SQL). Setelah dibandingkan, ternyata **kedua zip project asli itu
++sendiri sudah berisi hasil kerja sesi-sesi sebelumnya** (Model, Migration,
++Controller, Job, Middleware, blade partial — SEMUA sudah ter-copy ke lokasi
++finalnya di dalam project, bukan cuma di folder `webhook-integration/`
++sebagai snippet lepas). Ini mengubah beberapa asumsi lama di HANDOFF_NOTES:
++
++- **Poin 4a TERJAWAB SEBAGIAN**: `bootstrap/app.php` PTSP **memang ADA** di
++  `ptsptmg-main.zip` yang di-upload sesi ini, dan isinya SAMA PERSIS dengan
++  hasil rekonstruksi paket ini (termasuk alias `role`, `verify.webhook`,
++  pengecualian CSRF `webhook/*`). Kemungkinan besar project asli memang
++  belum punya file ini sebelum sesi-sesi terdahulu membuatnya, dan file itu
++  sudah ter-commit/ter-simpan ke project asli entah bagaimana (di luar
++  sesi chat ini — tidak diketahui apakah user yang menyalin manual atau
++  ada sesi lain). **MASIH tetap disarankan dicek oleh developer yang paham
++  project ini** (apakah ada provider/exception handling lain yang hilang),
++  tapi risikonya jauh lebih rendah dari yang dicatat sebelumnya.
++- **Migration, Model, Middleware, Job, Controller, blade partial** — semua
++  SUDAH berada di lokasi final masing-masing project (bukan snippet lagi).
++
++**YANG TERNYATA MASIH KURANG** (dan sudah diperbaiki sesi ini, lihat poin b):
++1. `routes/web.php` di KEDUA project **belum** didaftarkan (route
++   webhook di PTSP, route `request-tiket`/`unggah-rekom` di LM) — cuma ada
++   di file `routes/web-snippet.php` yang terpisah, belum ditempel.
++2. `config/services.php` PTSP **belum** punya key `layanan_madrasah`
++   (LM sudah punya key `ptsp`).
++3. `resources/views/admin/monitor_layanan.blade.php` (LM) **belum** ada
++   `@include('admin.partials._ptsp_ticket_buttons', ...)` — partial-nya
++   sudah ada sebagai file tapi belum dipanggil dari halaman monitor.
++4. **Project asli (`layanan-madrasah.zip`) MASIH PAKAI VERSI LAMA** dari
++   `RequestTiketPtspJob.php`, `UploadRekomPtspJob.php`, dan
++   `VerifyPtspWebhookSecret.php` — versi SEBELUM perubahan HMAC signature
++   di poin 8b (tidak ada header `X-Webhook-Signature`, masih pakai
++   `->post($url, $payload)` alih-alih `->withBody()`). Begitu juga
++   `VerifyLayananMadrasahWebhookSecret.php` di `ptsptmg-main.zip`. Artinya
++   perubahan HMAC di sesi ke-3 (poin 8) **HANYA sempat disimpan di paket
++   referensi `webhook-integration/`, TIDAK PERNAH benar-benar disalin ke
++   file project asli** sebelum sesi ini.
++
++### b. SELESAI sesi ini: sinkronisasi + integrasi routes/config/blade
++
++Perubahan berikut diterapkan LANGSUNG ke file final di kedua project
++(bukan cuma snippet), lalu di-zip ulang:
++
++**PTSP Online (`ptsptmg-main`):**
++- `routes/web.php` — ditambahkan grup `Route::prefix('webhook')->middleware(['verify.webhook','throttle:60,1'])` dengan 2 route (`webhook.permohonan.tiket`, `webhook.permohonan.rekomendasi`), diletakkan sebelum `require __DIR__.'/auth.php';`.
++- `config/services.php` — ditambahkan key `layanan_madrasah` (`webhook_secret`, `default_layanan_id`).
++- `app/Http/Middleware/VerifyLayananMadrasahWebhookSecret.php` — disinkronkan ke versi ber-HMAC (poin 8b).
++
++**Layanan Madrasah (`layanan-madrasah`):**
++- `routes/web.php` — ditambahkan 2 route di dalam grup `admin.` + `admin.auth`
++  (setelah `monitor.rekomendasi`): `POST admin/rekomendasi/{data}/request-tiket`
++  (name: `admin.rekomendasi.request_tiket`) dan
++  `POST admin/rekomendasi/{data}/unggah-rekom` (name: `admin.rekomendasi.unggah_rekom`)
++  — nama route ini **harus cocok** dengan yang dipakai di
++  `_ptsp_ticket_buttons.blade.php` (sudah dicek, cocok).
++- `resources/views/admin/monitor_layanan.blade.php` — ditambahkan
++  `@include('admin.partials._ptsp_ticket_buttons', ['data' => $data])` tepat
++  setelah blok tombol "Lihat PDF" di dalam `@if($tipe == 'rekomendasi')`.
++- `app/Jobs/RequestTiketPtspJob.php`, `app/Jobs/UploadRekomPtspJob.php`,
++  `app/Http/Middleware/VerifyPtspWebhookSecret.php` — disinkronkan ke versi
++  ber-HMAC (poin 8b), disalin apa adanya dari `webhook-integration/`.
++
++**Belum diverifikasi ke MySQL/browser sungguhan** (sandbox tidak ada akses
++menjalankan Laravel + MySQL) — cek sekali lagi secara manual/staging bahwa
++route tidak bentrok nama/prefix dengan route lain di masing-masing
++`web.php` sebelum deploy.
++
++### c. SELESAI sesi ini: Feature test & Unit test (poin 4g / 8c-1 / 8c-2)
++
++Ditambahkan (file baru, TIDAK menimpa test yang sudah ada):
++- `ptsptmg-main/tests/Feature/WebhookControllerTest.php` — 8 test:
++  token salah (401), signature HMAC salah (401), Fase 1 sukses + signature
++  valid (201, cek `no_tiket` tersimpan & format `TKT-`), payload tidak
++  valid (422), double-submit Fase 1 (tidak duplikat, no_tiket sama), Fase 2
++  sukses (200, status jadi `selesai`), Fase 2 `no_tiket` tidak ditemukan
++  (404), dan cek header rate-limit ada (memastikan `throttle:60,1` benar
++  terpasang).
++- `layanan-madrasah/tests/Unit/PtspIntegrationJobsTest.php` — 5 test:
++  `RequestTiketPtspJob` kirim signature HMAC valid & simpan `no_tiket`,
++  skip jika sudah punya `no_tiket` (tidak panggil HTTP sama sekali),
++  simpan `ptsp_last_error` + lempar exception saat PTSP respons 500,
++  `UploadRekomPtspJob` kirim signature HMAC valid & update status, dan
++  tidak memanggil HTTP sama sekali jika `no_tiket` masih kosong.
++
++**BELUM PERNAH DIJALANKAN — INI PALING PENTING UNTUK DITINDAKLANJUTI.**
++Sandbox sesi ini TIDAK punya `vendor/` dan TIDAK BISA `composer install`
++karena daftar domain jaringan yang diizinkan di sandbox tidak termasuk
++`packagist.org` / `repo.packagist.org` (hanya `pypi.org`, `npmjs.org`,
++`github.com`/`codeload.github.com`, dsb. — cocok untuk Python/Node/Rust,
++tapi TIDAK untuk Composer/PHP). Artinya kedua file test di atas ditulis
++murni dari membaca kode sumber controller/job yang ada — **belum pernah
++benar-benar dieksekusi**, jadi kemungkinan ada typo nama kolom, nama route,
++atau kesalahan asumsi lain yang baru akan ketahuan saat `php artisan test`
++benar-benar dijalankan.
++
++**Langkah pertama WAJIB untuk sesi/developer berikutnya:**
++```bash
++cd ptsptmg-main && composer install && php artisan test --filter=WebhookControllerTest
++cd layanan-madrasah && composer install && php artisan test --filter=PtspIntegrationJobsTest
++```
++Perbaiki apa pun yang gagal — kemungkinan besar penyebabnya salah satu dari:
++nama kolom `layanan.id` bentrok saat insert manual id=26 (SQLite mungkin
++berperilaku beda dari MySQL soal explicit ID pada auto-increment column —
++kalau gagal, coba `Layanan::factory()->create(['id' => 26, ...])` atau
++sesuaikan `default_layanan_id` di config test ke ID hasil factory), atau
++route model binding parameter `{data}` di LM tidak otomatis ke-resolve
++sebagai `LayananRekomendasi` (perlu dicek `RouteServiceProvider`/binding
++implisit default Laravel harusnya otomatis jalan berdasarkan tipe-hint,
++tapi tetap perlu dicek).
++
++### d. Item dari poin 4/7/8 yang MASIH BELUM DIKERJAKAN (tidak berubah)
++- **Feature/Unit test di atas belum dijalankan** (lihat poin c) — prioritas
++  #1 sekarang.
++- Verifikasi manual `bootstrap/app.php` PTSP oleh developer yang paham
++  project (risiko sudah lebih rendah, lihat poin a, tapi tetap disarankan).
++- Migration belum pernah dijalankan ke MySQL sungguhan (`php artisan migrate`
++  di staging) — termasuk migration BARU `add_ptsp_integration_columns...`
++  dan `add_webhook_columns...` yang sudah lama ada tapi belum divalidasi
++  di atas dump `.sql` sungguhan (cuma dibaca manual).
++- Queue worker belum di-setup di kedua sisi (`QUEUE_CONNECTION` jangan
++  `sync` di production).
++- UI belum dipoles (polling status, tombol retry manual untuk
++  `status_ptsp = 'gagal_kirim'`).
++- Webhook arah balik PTSP→LM belum di-routing (masih perlu konfirmasi user
++  apakah dibutuhkan).
++- Signature HMAC masih OPSIONAL (skip kalau header tidak dikirim) — setelah
++  lulus staging, wajibkan (hapus blok `if(!empty($signatureGiven))` di
++  kedua middleware).
++- IP allowlist masih belum dikerjakan sama sekali.
++- Idempotensi eksplisit Fase 2 (`updateRekomendasi`) masih belum dikerjakan
++  (risiko rendah).
++- Belum di-extend ke `layanan_rekom_kepalas` & `layanan_pindah` (butuh
++  konfirmasi user, lihat poin 2a/4h).
++
++### e. Prioritas untuk sesi berikutnya (diperbarui)
++1. **Jalankan `composer install` + kedua test file** di environment yang
++   punya akses packagist.org, perbaiki apa pun yang gagal. Ini SATU-SATUNYA
++   cara memastikan seluruh rangkaian perubahan sesi 1-4 benar-benar
++   berfungsi, karena belum pernah dieksekusi sama sekali sejak awal.
++2. Jalankan `php artisan migrate` di staging (MySQL sungguhan) untuk kedua
++   project, verifikasi tidak ada error (terutama unique index komposit
++   `permohonan_sumber_id_layanan_asal_unique` & panjang nama index).
++3. Test end-to-end manual sungguhan (dua app saling terhubung via HTTP,
++   bukan `Http::fake()`) — ikuti langkah di poin 6.
++4. Setelah (1)-(3) lulus: wajibkan signature HMAC (hapus fallback opsional),
++   tambahkan IP allowlist.
++5. Baru pertimbangkan extend ke 2 layanan lain (poin 4h) — butuh konfirmasi
++   user dulu.
++
++### f. File yang diubah/ditambah sesi ini
++Diterapkan ke KEDUA lokasi (paket referensi `webhook-integration/` DAN
++project asli `ptsptmg-main` / `layanan-madrasah`) supaya tidak drift lagi:
++- `ptsptmg-main/routes/web.php` (route webhook ditambahkan)
++- `ptsptmg-main/config/services.php` (key `layanan_madrasah` ditambahkan)
++- `ptsptmg-main/app/Http/Middleware/VerifyLayananMadrasahWebhookSecret.php` (disinkron ke versi HMAC)
++- `ptsptmg-main/tests/Feature/WebhookControllerTest.php` (BARU)
++- `layanan-madrasah/routes/web.php` (2 route ditambahkan)
++- `layanan-madrasah/resources/views/admin/monitor_layanan.blade.php` (`@include` ditambahkan)
++- `layanan-madrasah/app/Jobs/RequestTiketPtspJob.php` (disinkron ke versi HMAC)
++- `layanan-madrasah/app/Jobs/UploadRekomPtspJob.php` (disinkron ke versi HMAC)
++- `layanan-madrasah/app/Http/Middleware/VerifyPtspWebhookSecret.php` (disinkron ke versi HMAC)
++- `layanan-madrasah/tests/Unit/PtspIntegrationJobsTest.php` (BARU)
++- `HANDOFF_NOTES.md` (poin ini)
++
++**PENTING untuk sesi berikutnya:** mulai sekarang, KEDUA salinan (paket
++`webhook-integration/` yang ringan DAN project penuh) ada dalam satu zip
++handoff yang sama (lihat README di root zip handoff). Kalau mengedit salah
++satu Job/Middleware/Controller lagi, **edit di project penuh** (itu yang
++akan dipakai production) dan opsional saja disalin ke `webhook-integration/`
++untuk arsip — jangan sampai drift lagi seperti yang terjadi di sesi ini.
++
++## 10. Update sesi lanjutan — 28 Agustus 2026 (sesi ke-5)
++
++Sesi ini **TIDAK bisa mengeksekusi test** (prioritas #1 di poin 9e) karena
++sandbox sesi ini punya keterbatasan jaringan yang SAMA PERSIS dengan sesi
++ke-4: domain yang diizinkan tidak termasuk `packagist.org`/`repo.packagist.org`,
++dan tidak ada binary `php` terpasang di sandbox ini sama sekali (dicek
++`which php` -> not found), jadi bahkan syntax-lint pun tidak bisa dilakukan.
++**Ini kemungkinan besar akan tetap jadi batasan di sesi-sesi berikutnya juga
++selama dijalankan di lingkungan sandbox claude.ai** — developer manusia
++dengan akses `composer install` yang sesungguhnya tetap WAJIB menjalankan
++langkah di poin 9e-1 sebelum lanjut ke item lain manapun.
++
++Karena eksekusi tidak mungkin, sesi ini fokus ke **review manual/code-reading
++line-by-line** terhadap konsistensi kolom migration ⇄ fillable model ⇄ isi
++test, sebagai pengganti sementara "menjalankan test". Hasilnya: ditemukan
++**satu bug nyata** (poin a) yang sudah diperbaiki sesi ini.
++
++### a. BUG DITEMUKAN & DIPERBAIKI: `LayananRekomendasi::$fillable` tidak lengkap
++
++Migration `2026_08_28_000001_add_ptsp_integration_columns_to_layanan_rekomendasis_table.php`
++menambahkan kolom `no_tiket`, `link_drive_rekom`, `status_ptsp`,
++`ptsp_last_error` ke tabel `layanan_rekomendasis` — tapi
++`app/Models/LayananRekomendasi.php` **tidak pernah diupdate** untuk
++menambahkan keempat kolom itu ke `$fillable`.
++
++Ini tidak menyebabkan bug di `RequestTiketPtspJob`/`UploadRekomPtspJob`
++sendiri karena keduanya memakai `forceFill()->save()` (bypass mass-assignment
++protection) — jadi kalau cuma lewat alur Job, semua tetap jalan normal.//
++**TAPI** ini menyebabkan `tests/Unit/PtspIntegrationJobsTest.php` (dibuat
++sesi ke-4) akan salah/gagal saat benar-benar dijalankan: method
++`buatDataRekomendasi()` di test itu memakai
++`LayananRekomendasi::create(array_merge([...], $overrides))`, dan beberapa
++test case mengirim override `['no_tiket' => 'TKT-SUDAH-ADA000']` untuk
++mensimulasikan data yang sudah punya tiket. Karena `no_tiket` tidak
++fillable dan project ini **tidak mengaktifkan** `Model::shouldBeStrict()`
++(dicek: tidak ada `preventSilentlyDiscardingAttributes` di
++`bootstrap/app.php`), Laravel akan **diam-diam membuang** nilai `no_tiket`
++tsb alih-alih melempar error — hasilnya data test dibuat dengan `no_tiket`
++tetap `null`, sehingga:
++- `test_request_tiket_job_skip_jika_sudah_punya_no_tiket` akan GAGAL (job
++  tidak akan skip karena `no_tiket` sebenarnya kosong, jadi `Http::fake()`
++  tanpa response terdaftar akan tetap terpanggil dan `Http::assertNothingSent()`
++  gagal).
++- `test_upload_rekom_job_mengirim_signature_hmac_yang_valid_dan_update_status`
++  akan GAGAL (job akan early-return dengan error "Belum memiliki no_tiket"
++  alih-alih benar-benar mengirim HTTP request, jadi `Http::assertSent(...)`
++  gagal karena tidak ada request yang terkirim sama sekali).
++
++**Sudah diperbaiki**: keempat kolom ditambahkan ke `$fillable` di
++`layanan-madrasah/app/Models/LayananRekomendasi.php`. Tidak ada perubahan
++lain yang diperlukan (test-nya sendiri sudah benar, akar masalahnya cuma di
++model). **Tetap perlu dijalankan lewat `php artisan test` sungguhan** untuk
++konfirmasi final — perbaikan ini murni hasil pembacaan kode manual, belum
++tervalidasi secara eksekusi.
++
++Catatan tambahan: kalau HANDOFF poin 4h (extend ke `layanan_rekom_kepalas` /
++`layanan_pindah`) dikerjakan nanti, **cek juga `$fillable` model-model
++tersebut** saat menambahkan kolom serupa — kemungkinan besar celah yang sama
++akan terulang kalau developer lupa langkah ini lagi (pola: menambah kolom
++lewat migration + `forceFill()` di Job itu "berhasil" tanpa perlu update
++`$fillable`, jadi gampang lupa sampai ada kode lain yang benar-benar
++memakai mass-assignment biasa, seperti test factory).
++
++### b. Sisanya: review manual tanpa temuan bug baru
++
++Dibaca ulang tanpa temuan masalah (secara logika/konsistensi kolom, BUKAN
++dieksekusi): `WebhookController.php`, `Permohonan.php` + migration terkait,
++`VerifyLayananMadrasahWebhookSecret.php`, `bootstrap/app.php` PTSP,
++`routes/web.php` (kedua app), `RequestTiketPtspJob.php`,
++`UploadRekomPtspJob.php`, `tests/Feature/WebhookControllerTest.php`
++(termasuk verifikasi manual bahwa insert `Layanan::insert(['id'=>26,...])`
++di `setUp()` cocok kolom-kolom tabel `layanan` yang sebenarnya, dan bahwa
++`Http::withBody()` + `->post($url)` tanpa argumen data itu memang idiom
++yang benar di Laravel — bukan bug seperti dugaan awal sebelum dicek ke
++perilaku `parseHttpOptions()`).
++
++### c. Item dari poin 4/7/8/9 yang MASIH BELUM DIKERJAKAN (tidak berubah)
++Semua tetap sama seperti poin 9d, ditambah temuan poin 10a di atas sudah
++selesai. Prioritas #1 tetap **menjalankan test sungguhan** — sekarang
++dengan bug fillable sudah diperbaiki, harapannya lebih banyak test yang
++lulus begitu dijalankan, tapi ini TETAP BARU ASUMSI sampai benar-benar
++dieksekusi.
++
++### d. File yang diubah sesi ini
++- `layanan-madrasah/app/Models/LayananRekomendasi.php` (tambah 4 kolom ke `$fillable`)
++- `HANDOFF_NOTES.md` (poin ini)
++
++### e. Saran untuk sesi berikutnya
++1. **Tetap prioritas #1: jalankan `composer install` + kedua test file** di
++   environment yang punya akses packagist.org (sandbox claude.ai tidak
++   punya akses ini — sudah dikonfirmasi 2 sesi berturut-turut). Kalau sesi
++   berikutnya juga berjalan di sandbox yang sama, jangan buang tool-call
++   untuk mencoba lagi — langsung lompat ke review manual seperti sesi ini,
++   atau ke item lain yang tidak butuh eksekusi (poin 4f sisa: IP allowlist,
++   wajibkan HMAC).
++2. Kalau ternyata sesi berikutnya PUNYA akses composer/PHP: jalankan test,
++   lalu laporkan hasilnya secara spesifik (test mana yang gagal, pesan
++   errornya) di HANDOFF_NOTES supaya sesi sesudahnya tidak perlu menebak.
++3. Setelah test lulus: lanjut ke poin 9e-2 s.d. 9e-5 (migrate staging, E2E
++   manual, wajibkan HMAC + IP allowlist, baru pertimbangkan extend layanan
++   lain).
++
++## 11. Hasil eksekusi test (28 Agustus 2026)
++
++- Tanggal: 28 Agustus 2026 — kedua test suite akhirnya dijalankan secara
++  nyata pada environment lokal workspace ini.
++
++- Hasil ringkas:
++  - `ptsptmg-main/tests/Feature/WebhookControllerTest.php`: LULUS semua (8/8).
++  - `layanan-madrasah/tests/Unit/PtspIntegrationJobsTest.php`: LULUS semua (5/5).
++
++- Perbaikan yang dilakukan untuk membuat test bisa berjalan:
++  - `ptsptmg-main/config/database.php`: tambahkan fallback sehingga bila
++    `DB_CONNECTION` menunjuk `mysql` tetapi `DB_DATABASE` berisi
++    `:memory:` (konfigurasi testing yang ada), maka konfigurasi default
++    akan beralih ke `sqlite` agar in-memory DB benar-benar dipakai saat
++    test. Perubahan ini hanya bertujuan memperbaiki environment testing
++    (agar phpunit menggunakan SQLite in-memory) dan tidak mengubah
++    behaviour runtime produksi.
++
++  - `layanan-madrasah/app/Models/LayananRekomendasi.php`: tambahkan
++    kolom `no_tiket`, `link_drive_rekom`, `status_ptsp`, `ptsp_last_error`
++    ke properti `$fillable` supaya factory/test yang memakai
++    `LayananRekomendasi::create([...])` tidak kehilangan atribut mass-assignment.
++
++- Catatan operasional singkat:
++  - Saya menjalankan `composer install` dan `php artisan key:generate`
++    pada kedua project sebelum mengeksekusi test.
++  - Untuk `ptsptmg-main` saya menjalankan phpunit langsung via
++    `php vendor/phpunit/phpunit/phpunit --configuration phpunit.xml` agar
++    env di `phpunit.xml` (SQLite in-memory) terpakai; perubahan pada
++    `config/database.php` memastikan fallback aman.
++
++- File yang diubah selama eksekusi ini:
++  - `ptsptmg-main/config/database.php` (fallback testing SQLite)
++  - `layanan-madrasah/app/Models/LayananRekomendasi.php` (tambah `$fillable`)
++  - `HANDOFF_NOTES.md` (poin 11 ini)
++
++Jika Anda ingin saya juga membuat commit Git untuk perubahan ini dan
++menyiapkan patch/PR, beri tahu; saya dapat membuat commit lokal dan
++menulis pesan commit yang ringkas.
+diff --git a/app/Http/Controllers/PtspIntegrationController.php b/app/Http/Controllers/PtspIntegrationController.php
+new file mode 100644
+index 0000000..dfb1928
+--- /dev/null
++++ b/app/Http/Controllers/PtspIntegrationController.php
+@@ -0,0 +1,82 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use App\Jobs\RequestTiketPtspJob;
++use App\Jobs\UploadRekomPtspJob;
++use App\Models\LayananRekomendasi;
++use App\Support\LayananWorkflow;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Support\Facades\Log;
++
++class PtspIntegrationController extends Controller
++{
++    /**
++     * FASE 1 — Tombol "Ticket".
++     * Hanya admin_ptsp (atau super_admin) yang boleh memicu, dan hanya
++     * jika berkas (surat_path) sudah tersedia serta belum punya no_tiket.
++     */
++    public function requestTiket(LayananRekomendasi $data): RedirectResponse
++    {
++        $actor = auth('admin')->user() ?? auth()->user();
++
++        if (!$actor || !($actor->isAdminPtsp() || $actor->isSuperAdmin())) {
++            abort(403, 'Hanya Admin PTSP yang dapat meminta tiket.');
++        }
++
++        if (!empty($data->no_tiket)) {
++            return back()->with('warning', 'Pengajuan ini sudah memiliki nomor tiket PTSP.');
++        }
++
++        if (empty($data->surat_path)) {
++            return back()->with('error', 'Berkas surat belum tersedia, tidak bisa membuat tiket.');
++        }
++
++        try {
++            $data->forceFill(['status_ptsp' => 'dikirim', 'ptsp_last_error' => null])->save();
++
++            RequestTiketPtspJob::dispatch($data->id);
++
++            Log::info('[PTSP] RequestTiketPtspJob di-dispatch oleh ' . $actor->email ?? $actor->id, ['id' => $data->id]);
++        } catch (\Throwable $e) {
++            Log::error('[PTSP] Gagal dispatch RequestTiketPtspJob.', ['id' => $data->id, 'error' => $e->getMessage()]);
++            return back()->with('error', 'Gagal memproses permintaan tiket. Silakan coba lagi.');
++        }
++
++        return back()->with('success', 'Permintaan tiket sedang diproses di latar belakang. Halaman ini akan menampilkan nomor tiket setelah selesai.');
++    }
++
++    /**
++     * FASE 2 — Tombol "Unggah Rekom".
++     * Membutuhkan link_drive_rekom (link Google Drive hasil surat rekomendasi
++     * yang sudah diterbitkan oleh PTSP secara manual/offline, ATAU link yang
++     * sama dengan pdf_path bila surat digenerate otomatis oleh sistem ini).
++     */
++    public function unggahRekom(LayananRekomendasi $data): RedirectResponse
++    {
++        $actor = auth('admin')->user() ?? auth()->user();
++
++        if (!$actor || !($actor->isAdminPtsp() || $actor->isSuperAdmin())) {
++            abort(403, 'Hanya Admin PTSP yang dapat mengunggah rekomendasi.');
++        }
++
++        if (empty($data->no_tiket)) {
++            return back()->with('error', 'Data ini belum memiliki nomor tiket. Klik tombol "Ticket" terlebih dahulu.');
++        }
++
++        $link = request()->validate([
++            'link_drive_rekom' => ['required', 'url', 'max:2048'],
++        ])['link_drive_rekom'];
++
++        try {
++            UploadRekomPtspJob::dispatch($data->id, $link);
++
++            Log::info('[PTSP] UploadRekomPtspJob di-dispatch.', ['id' => $data->id, 'no_tiket' => $data->no_tiket]);
++        } catch (\Throwable $e) {
++            Log::error('[PTSP] Gagal dispatch UploadRekomPtspJob.', ['id' => $data->id, 'error' => $e->getMessage()]);
++            return back()->with('error', 'Gagal memproses unggah rekomendasi. Silakan coba lagi.');
++        }
++
++        return back()->with('success', 'Rekomendasi sedang diunggah ke PTSP Online di latar belakang.');
++    }
++}
+diff --git a/app/Http/Middleware/VerifyPtspWebhookSecret.php b/app/Http/Middleware/VerifyPtspWebhookSecret.php
+new file mode 100644
+index 0000000..a046238
+--- /dev/null
++++ b/app/Http/Middleware/VerifyPtspWebhookSecret.php
+@@ -0,0 +1,55 @@
++<?php
++
++namespace App\Http\Middleware;
++
++use Closure;
++use Illuminate\Http\Request;
++use Symfony\Component\HttpFoundation\Response;
++
++/**
++ * OPSIONAL / BELUM DIPAKAI PADA VERSI INI.
++ *
++ * Disiapkan untuk skenario dua-arah penuh: jika suatu saat PTSP Online perlu
++ * mengirim webhook BALIK ke Layanan Madrasah (mis. update status manual dari
++ * sisi PTSP tanpa melalui respons sinkron job), middleware ini bisa dipasang
++ * pada route baru di prefix /webhook milik aplikasi ini.
++ *
++ * Pada alur yang diminta di task ini (Fase 1 & 2), PTSP Online cukup
++ * membalas secara SINKRON lewat body response HTTP saat dipanggil oleh
++ * Job (RequestTiketPtspJob / UploadRekomPtspJob), sehingga middleware ini
++ * belum digunakan di routes/web.php. Lihat HANDOFF_NOTES.md.
++ */
++class VerifyPtspWebhookSecret
++{
++    public function handle(Request $request, Closure $next): Response
++    {
++        $expected = (string) config('services.ptsp.webhook_secret');
++        $given    = (string) $request->header('X-Webhook-Secret', '');
++
++        if (empty($expected) || !hash_equals($expected, $given)) {
++            return response()->json([
++                'success' => false,
++                'message' => 'Token webhook tidak valid.',
++            ], 401);
++        }
++
++        // Lapisan kedua (opsional selama masa transisi): lihat komentar
++        // setara di VerifyLayananMadrasahWebhookSecret milik PTSP Online
++        // untuk penjelasan lengkap. Header: X-Webhook-Signature =
++        // hash_hmac('sha256', $rawBody, $secret).
++        $signatureGiven = (string) $request->header('X-Webhook-Signature', '');
++
++        if (!empty($signatureGiven)) {
++            $signatureExpected = hash_hmac('sha256', (string) $request->getContent(), $expected);
++
++            if (!hash_equals($signatureExpected, $signatureGiven)) {
++                return response()->json([
++                    'success' => false,
++                    'message' => 'Signature webhook tidak valid.',
++                ], 401);
++            }
++        }
++
++        return $next($request);
++    }
++}
+diff --git a/app/Models/LayananRekomendasi.php b/app/Models/LayananRekomendasi.php
+index a08983a..b66fc8e 100644
+--- a/app/Models/LayananRekomendasi.php
++++ b/app/Models/LayananRekomendasi.php
+@@ -32,6 +32,20 @@ class LayananRekomendasi extends Model
+         'nama_ttd',
+         'format_surat',
+         'status_jabatan_ttd',
++        // --- Kolom baru integrasi webhook PTSP (lihat migration
++        // 2026_08_28_000001_add_ptsp_integration_columns_to_layanan_rekomendasis_table)
++        // Ditambahkan sesi ke-5: sebelumnya kolom ini sudah ada di DB & dipakai
++        // di RequestTiketPtspJob/UploadRekomPtspJob via forceFill() (makanya
++        // tidak pernah error di Job), TAPI karena tidak fillable, mass-assignment
++        // biasa (mis. LayananRekomendasi::create([...'no_tiket'=>...])) akan
++        // diam-diam membuang nilainya. Ini yang dipakai test factory di
++        // tests/Unit/PtspIntegrationJobsTest.php (buatDataRekomendasi()) untuk
++        // set no_tiket awal -> tanpa fix ini beberapa skenario test akan gagal
++        // secara salah (lihat HANDOFF_NOTES.md poin 10a).
++        'no_tiket',
++        'link_drive_rekom',
++        'status_ptsp',
++        'ptsp_last_error',
+     ];
+ 
+     public function user() {
+diff --git a/bootstrap/app.php b/bootstrap/app.php
+index 45675b0..97a81ef 100644
+--- a/bootstrap/app.php
++++ b/bootstrap/app.php
+@@ -11,16 +11,29 @@
+         health: '/up',
+     )
+     ->withMiddleware(function (Middleware $middleware) {
+-        
++
+         // Tambahkan alias middleware di sini, Bro!
+         $middleware->alias([
+             'admin.auth' => \App\Http\Middleware\AdminAuth::class,
+             'admin.guest' => \App\Http\Middleware\AdminGuest::class,
+             'user.auth' => \App\Http\Middleware\UserAuth::class,
+             'super_admin' => \App\Http\Middleware\SuperAdminOnly::class,
++            // Dipakai bila di masa depan PTSP Online butuh mengirim webhook
++            // balik ke aplikasi ini (mis. update status manual dari PTSP).
++            // Lihat app/Http/Middleware/VerifyPtspWebhookSecret.php (opsional,
++            // lihat HANDOFF_NOTES.md - belum diaktifkan/di-route pada versi ini).
++            'verify.webhook' => \App\Http\Middleware\VerifyPtspWebhookSecret::class,
++        ]);
++
++        // Route webhook (prefix /webhook) dikecualikan dari verifikasi CSRF
++        // karena dipanggil server-to-server (bukan dari browser dengan session),
++        // dan diamankan sendiri lewat header X-Webhook-Secret + middleware
++        // 'verify.webhook' di atas.
++        $middleware->validateCsrfTokens(except: [
++            'webhook/*',
+         ]);
+ 
+     })
+     ->withExceptions(function (Exceptions $exceptions) {
+         //
+-    })->create();
+\ No newline at end of file
++    })->create();
+diff --git a/config/auth.php b/config/auth.php
+index d7568ff..ba135d9 100644
+--- a/config/auth.php
++++ b/config/auth.php
+@@ -42,6 +42,11 @@
+             'driver' => 'session',
+             'provider' => 'users',
+         ],
++        // Alias guard untuk area admin — memetakan ke provider users.
++        'admin' => [
++            'driver' => 'session',
++            'provider' => 'users',
++        ],
+     ],
+ 
+     /*
+diff --git a/config/services.php b/config/services.php
+index cdf8970..e784123 100644
+--- a/config/services.php
++++ b/config/services.php
+@@ -46,4 +46,10 @@
+         'redirect' => env('GOOGLE_REDIRECT_URI', '/auth/google/callback'),
+     ],
+ 
++    'ptsp' => [
++        'base_url' => env('PTSP_BASE_URL'),
++        'webhook_secret' => env('PTSP_WEBHOOK_SECRET'),
++        'timeout' => (int) env('PTSP_WEBHOOK_TIMEOUT', 15),
++    ],
++
+ ];
+diff --git a/database/migrations/2026_08_28_000001_add_ptsp_integration_columns_to_layanan_rekomendasis_table.php b/database/migrations/2026_08_28_000001_add_ptsp_integration_columns_to_layanan_rekomendasis_table.php
+new file mode 100644
+index 0000000..1034dcc
+--- /dev/null
++++ b/database/migrations/2026_08_28_000001_add_ptsp_integration_columns_to_layanan_rekomendasis_table.php
+@@ -0,0 +1,50 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++/**
++ * CATATAN PENTING (baca HANDOFF_NOTES.md):
++ * Aplikasi Layanan Madrasah tidak memiliki tabel bernama `data_layanan`.
++ * Yang ada adalah 7 tabel layanan terpisah (layanan_rekomendasis,
++ * layanan_rekom_kepalas, layanan_pindah, dll — lihat app/Support/LayananWorkflow.php).
++ *
++ * Alur "Ticket" & "Unggah Rekom" pada permintaan ini paling relevan dengan
++ * alur REKOMENDASI, sehingga migration ini menyasar tabel `layanan_rekomendasis`
++ * (model: App\Models\LayananRekomendasi) sebagai representasi `data_layanan`.
++ *
++ * Untuk menerapkan pola yang sama ke layanan_rekom_kepalas / layanan_pindah,
++ * duplikasi migration ini dengan nama tabel berbeda (lihat HANDOFF_NOTES.md).
++ */
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::table('layanan_rekomendasis', function (Blueprint $table) {
++            if (!Schema::hasColumn('layanan_rekomendasis', 'no_tiket')) {
++                $table->string('no_tiket')->nullable()->after('status')
++                    ->comment('Nomor tiket dari PTSP Online (format TKT-XXXXXXXXXXXXX)');
++            }
++            if (!Schema::hasColumn('layanan_rekomendasis', 'link_drive_rekom')) {
++                $table->string('link_drive_rekom')->nullable()->after('no_tiket')
++                    ->comment('Link Google Drive surat rekomendasi resmi dari PTSP Online');
++            }
++            if (!Schema::hasColumn('layanan_rekomendasis', 'status_ptsp')) {
++                $table->string('status_ptsp')->nullable()->after('link_drive_rekom')
++                    ->comment('Status sinkronisasi webhook: dikirim, Tiket PTSP Diterima, Rekomendasi Terbit, gagal_kirim');
++            }
++            if (!Schema::hasColumn('layanan_rekomendasis', 'ptsp_last_error')) {
++                $table->text('ptsp_last_error')->nullable()->after('status_ptsp')
++                    ->comment('Pesan error terakhir jika Job webhook gagal (untuk ditampilkan ke admin)');
++            }
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::table('layanan_rekomendasis', function (Blueprint $table) {
++            $table->dropColumn(['no_tiket', 'link_drive_rekom', 'status_ptsp', 'ptsp_last_error']);
++        });
++    }
++};
+diff --git a/resources/views/admin/monitor_layanan.blade.php b/resources/views/admin/monitor_layanan.blade.php
+index 32730eb..e390c7e 100644
+--- a/resources/views/admin/monitor_layanan.blade.php
++++ b/resources/views/admin/monitor_layanan.blade.php
+@@ -226,6 +226,8 @@
+                                         <i class="bi bi-file-earmark-richtext me-2"></i> Lihat PDF
+                                     </button>
+                                 </div>
++                                {{-- Integrasi PTSP Online (ditambahkan sesi lanjutan) --}}
++                                @include('admin.partials._ptsp_ticket_buttons', ['data' => $data])
+                             @elseif($tipe == 'rekomendasi_kamad')
+                                 <div class="flex flex-col gap-2">
+                                     <button type="button" onclick="openPdfModal('{{ route('admin.preview.file', ['tipe' => 'rekomendasi_kamad', 'id' => $data->id, 'key' => 'file_surat_permohonan']) }}', 'Surat Permohonan', 'ID #{{ $data->id }}', '{{ route('admin.preview.file', ['tipe' => 'rekomendasi_kamad', 'id' => $data->id, 'key' => 'file_surat_permohonan']) }}')" class="inline-flex items-center justify-center rounded-lg border border-sky-300 px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50">
+diff --git a/resources/views/admin/partials/_ptsp_ticket_buttons.blade.php b/resources/views/admin/partials/_ptsp_ticket_buttons.blade.php
+new file mode 100644
+index 0000000..4e8f3a4
+--- /dev/null
++++ b/resources/views/admin/partials/_ptsp_ticket_buttons.blade.php
+@@ -0,0 +1,85 @@
++{{--
++    Tombol integrasi PTSP Online (Fase 1 & 2).
++
++    CARA PAKAI:
++    Di dalam resources/views/admin/monitor_layanan.blade.php, cari blok
++    "@if($tipe == 'rekomendasi')" (sekitar baris 190-227 pada file asli,
++    tempat tombol "Surat" / "Proposal" / "Surat Rekomendasi" dirender),
++    lalu tambahkan @include berikut TEPAT SETELAH blok tombol tersebut,
++    dan pastikan variabel $data tersedia di scope (sudah otomatis tersedia
++    di dalam @foreach admin/monitor_layanan.blade.php):
++
++        @if($tipe == 'rekomendasi')
++            @include('admin.partials._ptsp_ticket_buttons', ['data' => $data])
++        @endif
++
++    Hanya tampil untuk role admin_ptsp / super_admin (disesuaikan dengan
++    pola @if(!auth()->user()->isAdminPtsp() ...) yang sudah dipakai di file
++    aslinya untuk tombol lain).
++--}}
++@if(auth()->user()->isAdminPtsp() || auth()->user()->isSuperAdmin())
++    <div class="mt-2 d-flex flex-wrap gap-2 align-items-center">
++
++        @if(empty($data->no_tiket))
++            {{-- FASE 1: belum punya tiket -> tampilkan tombol "Ticket" --}}
++            <form action="{{ route('admin.rekomendasi.request_tiket', ['data' => $data->id]) }}" method="POST"
++                  onsubmit="return confirm('Kirim permintaan tiket ke PTSP Online untuk pengajuan ini?');">
++                @csrf
++                <button type="submit" class="btn btn-sm btn-primary" {{ empty($data->surat_path) ? 'disabled' : '' }}>
++                    <i class="bi bi-ticket-perforated"></i> Ticket
++                </button>
++            </form>
++            @if(empty($data->surat_path))
++                <small class="text-muted">Berkas surat belum diunggah</small>
++            @endif
++        @else
++            {{-- Tiket sudah ada -> tampilkan nomor tiket + tombol "Unggah Rekom" --}}
++            <span class="badge bg-info-subtle text-info-emphasis border border-info-subtle">
++                <i class="bi bi-ticket-perforated-fill"></i> {{ $data->no_tiket }}
++            </span>
++
++            @if(empty($data->link_drive_rekom))
++                <button type="button" class="btn btn-sm btn-success"
++                        data-bs-toggle="modal" data-bs-target="#unggahRekomModal{{ $data->id }}">
++                    <i class="bi bi-cloud-upload"></i> Unggah Rekom
++                </button>
++
++                <div class="modal fade" id="unggahRekomModal{{ $data->id }}" tabindex="-1" aria-hidden="true">
++                    <div class="modal-dialog">
++                        <form action="{{ route('admin.rekomendasi.unggah_rekom', ['data' => $data->id]) }}" method="POST" class="modal-content">
++                            @csrf
++                            <div class="modal-header">
++                                <h5 class="modal-title">Unggah Link Rekomendasi</h5>
++                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
++                            </div>
++                            <div class="modal-body">
++                                <label class="form-label">Link Google Drive Surat Rekomendasi</label>
++                                <input type="url" name="link_drive_rekom" class="form-control"
++                                       placeholder="https://drive.google.com/..." required>
++                                <small class="text-muted">Tiket: {{ $data->no_tiket }}</small>
++                            </div>
++                            <div class="modal-footer">
++                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Batal</button>
++                                <button type="submit" class="btn btn-success">Kirim ke PTSP</button>
++                            </div>
++                        </form>
++                    </div>
++                </div>
++            @else
++                <span class="badge bg-success-subtle text-success-emphasis border border-success-subtle">
++                    <i class="bi bi-check-circle-fill"></i> Rekomendasi Terbit
++                </span>
++                <a href="{{ $data->link_drive_rekom }}" target="_blank" class="btn btn-sm btn-outline-success">
++                    <i class="bi bi-box-arrow-up-right"></i> Lihat Rekom
++                </a>
++            @endif
++        @endif
++
++        @if($data->status_ptsp === 'gagal_kirim' && $data->ptsp_last_error)
++            <span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle"
++                  title="{{ $data->ptsp_last_error }}">
++                <i class="bi bi-exclamation-triangle-fill"></i> Gagal kirim ke PTSP
++            </span>
++        @endif
++    </div>
++@endif
+diff --git a/routes/web-snippet.php b/routes/web-snippet.php
+new file mode 100644
+index 0000000..27ddae7
+--- /dev/null
++++ b/routes/web-snippet.php
+@@ -0,0 +1,17 @@
++<?php
++/**
++ * TEMPEL blok ini di dalam routes/web.php (Layanan Madrasah),
++ * di dalam grup: Route::prefix('admin')->name('admin.')->group(...)
++ *   -> Route::middleware(['admin.auth'])->group(function () { ... })
++ * (grup yang sama tempat 'update_status' & 'delete_submission' berada,
++ * lihat sekitar baris 162-163 di web.php asli).
++ *
++ * Jangan lupa tambahkan use statement di bagian atas file:
++ *   use App\Http\Controllers\PtspIntegrationController;
++ */
++
++Route::post('rekomendasi/{data}/request-tiket', [PtspIntegrationController::class, 'requestTiket'])
++    ->name('rekomendasi.request_tiket');
++
++Route::post('rekomendasi/{data}/unggah-rekom', [PtspIntegrationController::class, 'unggahRekom'])
++    ->name('rekomendasi.unggah_rekom');
+diff --git a/routes/web.php b/routes/web.php
+index 15c5678..3711e6b 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -144,6 +144,19 @@
+         Route::get('monitor/salah-tingkat', [AdminController::class, 'monitorSalahTingkat'])->name('monitor.salah_tingkat');
+         Route::get('monitor/rekomendasi', [AdminController::class, 'monitorRekomendasi'])->name('monitor.rekomendasi');
+         Route::get('monitor/pindah-sekolah', [AdminController::class, 'monitorPindahSekolah'])->name('monitor.pindah_sekolah');
++
++        // --- Integrasi PTSP Online (ditambahkan sesi lanjutan) ---
++        // Dipanggil dari tombol "Ticket" / "Unggah Rekom" di
++        // admin/monitor_layanan.blade.php (lihat
++        // resources/views/admin/partials/_ptsp_ticket_buttons.blade.php).
++        // Otorisasi (hanya admin_ptsp/super_admin) dicek di dalam
++        // PtspIntegrationController itu sendiri, bukan lewat middleware,
++        // supaya konsisten dengan pola controller lain di file ini.
++        // Lihat webhook-integration/HANDOFF_NOTES.md.
++        Route::post('rekomendasi/{data}/request-tiket', [App\Http\Controllers\PtspIntegrationController::class, 'requestTiket'])
++            ->name('rekomendasi.request_tiket');
++        Route::post('rekomendasi/{data}/unggah-rekom', [App\Http\Controllers\PtspIntegrationController::class, 'unggahRekom'])
++            ->name('rekomendasi.unggah_rekom');
+         // Kumpulan Akun: Managemen User & Profil
+         Route::get('monitor/manajemen-user', [AdminController::class, 'manageUsers'])->name('monitor.manajemen_user');
+         Route::get('monitor/madrasah', [AdminController::class, 'monitorMadrasah'])->name('monitor.madrasah');
+diff --git a/scripts/run_upload_rekom.php b/scripts/run_upload_rekom.php
+new file mode 100644
+index 0000000..304dfae
+--- /dev/null
++++ b/scripts/run_upload_rekom.php
+@@ -0,0 +1,38 @@
++<?php
++require __DIR__ . '/../vendor/autoload.php';
++$app = require_once __DIR__ . '/../bootstrap/app.php';
++$kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
++$kernel->bootstrap();
++
++use App\Models\LayananRekomendasi;
++use App\Jobs\UploadRekomPtspJob;
++
++$id = $argv[1] ?? 2;
++$lr = LayananRekomendasi::find($id);
++if (! $lr) {
++    echo "LayananRekomendasi id=$id not found\n";
++    exit(1);
++}
++
++// provide a sample link if missing
++if (empty($lr->link_drive_rekom)) {
++    $lr->link_drive_rekom = 'https://drive.google.com/file/d/FAKE_UPLOAD_ID/view?usp=sharing';
++}
++
++$lr->status_ptsp = 'dikirim';
++$lr->ptsp_last_error = null;
++$lr->save();
++
++echo "Dispatching UploadRekomPtspJob for layanan_rekomendasi id={$id}\n";
++
++try {
++    UploadRekomPtspJob::dispatchSync($id, $lr->link_drive_rekom);
++    echo "Job dispatched\n";
++} catch (\Throwable $e) {
++    echo "Job failed: " . $e->getMessage() . "\n";
++    exit(1);
++}
++
++// show updated model
++$lr->refresh();
++echo json_encode($lr->toArray(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+diff --git a/tests/Unit/PtspIntegrationJobsTest.php b/tests/Unit/PtspIntegrationJobsTest.php
+new file mode 100644
+index 0000000..9164f81
+--- /dev/null
++++ b/tests/Unit/PtspIntegrationJobsTest.php
+@@ -0,0 +1,147 @@
++<?php
++
++namespace Tests\Unit;
++
++use App\Jobs\RequestTiketPtspJob;
++use App\Jobs\UploadRekomPtspJob;
++use App\Models\LayananRekomendasi;
++use Illuminate\Support\Facades\Http;
++use Tests\TestCase;
++
++/**
++ * Ditambahkan sesi lanjutan (lihat webhook-integration/HANDOFF_NOTES.md
++ * poin 4g / 7e-2 / 8c-2). Belum pernah dijalankan (sandbox tidak punya
++ * `vendor/` — composer install tidak bisa akses packagist.org dari daftar
++ * domain yang diizinkan). JALANKAN `php artisan test --filter=PtspIntegrationJobsTest`
++ * di environment yang punya `composer install` sebelum dianggap lulus.
++ *
++ * Catatan penting: RequestTiketPtspJob/UploadRekomPtspJob menghitung
++ * X-Webhook-Signature dari `json_encode($payload)` dan mengirim body via
++ * `withBody()`, BUKAN lewat `Http::post($url, $payload)`. Assert di bawah
++ * membandingkan raw request body (bukan $request->data()) supaya benar-benar
++ * menguji kecocokan antara body yang di-hash dan body yang dikirim di wire.
++ */
++class PtspIntegrationJobsTest extends TestCase
++{
++    private function buatDataRekomendasi(array $overrides = []): LayananRekomendasi
++    {
++        return LayananRekomendasi::create(array_merge([
++            'nsm' => '123456789012',
++            'nama_madrasah' => 'MTs Contoh',
++            'no_surat' => 'SP/001/2026',
++            'tanggal_surat' => now()->toDateString(),
++            'hal_permohonan' => 'Permohonan Rekomendasi',
++            'tujuan' => 'Kabupaten Sidoarjo',
++            'kota_tujuan' => 'Sidoarjo',
++            'surat_path' => 'surat/contoh.pdf',
++            'status' => 'disetujui',
++        ], $overrides));
++    }
++
++    private function fakeConfig(): void
++    {
++        config([
++            'services.ptsp.base_url' => 'https://ptsp.test',
++            'services.ptsp.webhook_secret' => 'secret-ptsp-test',
++            'services.ptsp.timeout' => 15,
++        ]);
++    }
++
++    public function test_request_tiket_job_mengirim_signature_hmac_yang_valid_dan_menyimpan_no_tiket(): void
++    {
++        $this->fakeConfig();
++        $data = $this->buatDataRekomendasi();
++
++        Http::fake([
++            'https://ptsp.test/webhook/permohonan/tiket' => Http::response([
++                'success' => true,
++                'nomor_tiket' => 'TKT-ABCDEFGHIJKLM',
++            ], 201),
++        ]);
++
++        RequestTiketPtspJob::dispatchSync($data->id);
++
++        Http::assertSent(function ($request) {
++            $expectedSignature = hash_hmac('sha256', $request->body(), 'secret-ptsp-test');
++
++            return $request->url() === 'https://ptsp.test/webhook/permohonan/tiket'
++                && $request->hasHeader('X-Webhook-Secret', 'secret-ptsp-test')
++                && $request->header('X-Webhook-Signature')[0] === $expectedSignature;
++        });
++
++        $data->refresh();
++        $this->assertSame('TKT-ABCDEFGHIJKLM', $data->no_tiket);
++        $this->assertSame('Tiket PTSP Diterima', $data->status_ptsp);
++        $this->assertNull($data->ptsp_last_error);
++    }
++
++    public function test_request_tiket_job_skip_jika_sudah_punya_no_tiket(): void
++    {
++        $this->fakeConfig();
++        $data = $this->buatDataRekomendasi(['no_tiket' => 'TKT-SUDAH-ADA000']);
++
++        Http::fake();
++
++        RequestTiketPtspJob::dispatchSync($data->id);
++
++        Http::assertNothingSent();
++    }
++
++    public function test_request_tiket_job_menyimpan_error_dan_melempar_exception_saat_ptsp_gagal(): void
++    {
++        $this->fakeConfig();
++        $data = $this->buatDataRekomendasi();
++
++        Http::fake([
++            'https://ptsp.test/*' => Http::response(['success' => false], 500),
++        ]);
++
++        $this->expectException(\RuntimeException::class);
++
++        try {
++            RequestTiketPtspJob::dispatchSync($data->id);
++        } finally {
++            $data->refresh();
++            $this->assertNotEmpty($data->ptsp_last_error);
++            $this->assertEmpty($data->no_tiket);
++        }
++    }
++
++    public function test_upload_rekom_job_mengirim_signature_hmac_yang_valid_dan_update_status(): void
++    {
++        $this->fakeConfig();
++        $data = $this->buatDataRekomendasi(['no_tiket' => 'TKT-SUDAH-ADA000']);
++
++        Http::fake([
++            'https://ptsp.test/webhook/permohonan/rekomendasi' => Http::response(['success' => true], 200),
++        ]);
++
++        UploadRekomPtspJob::dispatchSync($data->id, 'https://drive.google.com/file/rekom-x');
++
++        Http::assertSent(function ($request) {
++            $expectedSignature = hash_hmac('sha256', $request->body(), 'secret-ptsp-test');
++
++            return $request->url() === 'https://ptsp.test/webhook/permohonan/rekomendasi'
++                && $request->header('X-Webhook-Signature')[0] === $expectedSignature;
++        });
++
++        $data->refresh();
++        $this->assertSame('https://drive.google.com/file/rekom-x', $data->link_drive_rekom);
++        $this->assertSame('Rekomendasi Terbit', $data->status_ptsp);
++    }
++
++    public function test_upload_rekom_job_tidak_memanggil_http_jika_belum_punya_no_tiket(): void
++    {
++        $this->fakeConfig();
++        $data = $this->buatDataRekomendasi(); // no_tiket masih kosong
++
++        Http::fake();
++
++        UploadRekomPtspJob::dispatchSync($data->id, 'https://drive.google.com/file/rekom-x');
++
++        Http::assertNothingSent();
++
++        $data->refresh();
++        $this->assertNotEmpty($data->ptsp_last_error);
++    }
++}
+-- 
+2.55.0.windows.4
+

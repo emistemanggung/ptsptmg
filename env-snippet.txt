@@ -1,0 +1,19 @@
+# Tambahkan ke .env aplikasi PTSP Online
+
+# Harus SAMA PERSIS dengan PTSP_WEBHOOK_SECRET di aplikasi Layanan Madrasah
+LAYANAN_MADRASAH_WEBHOOK_SECRET=ganti-dengan-string-acak-panjang-dan-rahasia
+
+# Fallback kalau tipe_layanan tidak dikenali sama sekali (seharusnya tidak
+# pernah terjadi). 26 = "Surat Rekomendasi".
+LAYANAN_MADRASAH_DEFAULT_LAYANAN_ID=26
+
+# Mapping tipe_layanan -> id tabel `layanan` PTSP (sudah diverifikasi ke
+# dump laravel.sql, 31 Agt 2026). Nilai di bawah ini SUDAH jadi default di
+# config/services.php, jadi baris-baris ini OPSIONAL -- isi hanya kalau ID
+# di production ternyata berbeda dari dump.
+# LAYANAN_MADRASAH_LAYANAN_ID_INPUT_SISWA=67
+# LAYANAN_MADRASAH_LAYANAN_ID_REAKTIVASI=67
+# LAYANAN_MADRASAH_LAYANAN_ID_RESET_VERVAL=69
+# LAYANAN_MADRASAH_LAYANAN_ID_REKOMENDASI=62
+# LAYANAN_MADRASAH_LAYANAN_ID_REKOMENDASI_KAMAD=61
+# LAYANAN_MADRASAH_LAYANAN_ID_PINDAH_SEKOLAH=26

@@ -34,11 +34,6 @@ class Layanan extends Model
 
     protected $casts = [
         'target_pengguna' => 'array',
-        // Tanpa cast ini, nilai dari DB tetap int mentah (0/1) sementara
-        // $request->boolean() di controller mengembalikan bool asli PHP —
-        // perbandingan (string) antara keduanya salah mendeteksi "berubah"
-        // padahal nilainya sama (lihat SeksiLayananController::buatRingkasanPerubahan()).
-        'perlu_dokumen_hasil' => 'boolean',
     ];
 
     public function persyaratan(): HasMany
@@ -82,14 +77,5 @@ class Layanan extends Model
     public function templateSurat(): HasMany
     {
         return $this->hasMany(TemplateSurat::class, 'layanan_id');
-    }
-
-    /**
-     * Riwayat perubahan layanan oleh petugas seksi (fitur "kelola layanan
-     * seksi sendiri") — dipakai admin & petugas seksi untuk audit.
-     */
-    public function perubahanLog(): HasMany
-    {
-        return $this->hasMany(LayananPerubahanLog::class, 'layanan_id')->latest();
     }
 }

@@ -8,7 +8,7 @@
 </x-sidebar-link>
 
 @if(Auth::user()->role === 'admin')
-    <p class="sidebar-label mb-2 mt-6 flex items-center gap-1.5 px-3 text-xs font-bold uppercase tracking-wider text-emerald-700/80"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Kelola Data</p>
+    <p class="sidebar-label mt-6 mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-slate-400">Kelola Data</p>
     <x-sidebar-link :href="route('statistics.index')" :active="request()->routeIs('statistics.*')">
         <x-slot:icon><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg></x-slot:icon>
         Statistik
@@ -30,47 +30,35 @@
         Template Surat
     </x-sidebar-link>
 @elseif(Auth::user()->role === 'petugas')
-    <p class="sidebar-label mb-2 mt-6 flex items-center gap-1.5 px-3 text-xs font-bold uppercase tracking-wider text-emerald-700/80"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Loket PTSP</p>
+    <p class="sidebar-label mt-6 mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-slate-400">Loket PTSP</p>
     <x-sidebar-link :href="route('statistics.index')" :active="request()->routeIs('statistics.*')">
         <x-slot:icon><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg></x-slot:icon>
         Statistik
     </x-sidebar-link>
-    <x-sidebar-link :href="route('petugas.permohonan.index')" :active="request()->routeIs('petugas.permohonan.index')">
+    <x-sidebar-link :href="route('petugas.permohonan.index')" :active="request()->routeIs('petugas.permohonan.*') && !request()->routeIs('petugas.permohonan.offline.*')">
         <x-slot:icon><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-3.5a1 1 0 00-.9.55l-.7 1.4a1 1 0 01-.9.55h-3a1 1 0 01-.9-.55l-.7-1.4a1 1 0 00-.9-.55H4" /></svg></x-slot:icon>
-        Permohonan Terbaru
-    </x-sidebar-link>
-    <x-sidebar-link :href="route('petugas.permohonan.daftar')" :active="request()->routeIs('petugas.permohonan.daftar')">
-        <x-slot:icon><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2" /></svg></x-slot:icon>
-        Daftar Permohonan
+        Permohonan
     </x-sidebar-link>
     <x-sidebar-link :href="route('petugas.permohonan.offline.index')" :active="request()->routeIs('petugas.permohonan.offline.*')">
         <x-slot:icon><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg></x-slot:icon>
-        Permohonan Langsung
+        Permohonan Offline
     </x-sidebar-link>
     <x-sidebar-link :href="route('petugas.layanan.index')" :active="request()->routeIs('petugas.layanan.*')">
         <x-slot:icon><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" /></svg></x-slot:icon>
-        Daftar Layanan
+        Layanan
     </x-sidebar-link>
 @elseif(Auth::user()->role === 'petugas_seksi')
-    <p class="sidebar-label mb-2 mt-6 flex items-center gap-1.5 px-3 text-xs font-bold uppercase tracking-wider text-emerald-700/80"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Seksi {{ Auth::user()->seksi->nama_seksi ?? '' }}</p>
+    <p class="sidebar-label mt-6 mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-slate-400">Seksi {{ Auth::user()->seksi->nama_seksi ?? '' }}</p>
     <x-sidebar-link :href="route('statistics.index')" :active="request()->routeIs('statistics.*')">
         <x-slot:icon><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg></x-slot:icon>
         Statistik
     </x-sidebar-link>
-    <x-sidebar-link :href="route('seksi.permohonan.index')" :active="request()->routeIs('seksi.permohonan.index') || request()->routeIs('seksi.permohonan.show') || request()->routeIs('seksi.surat.*')">
+    <x-sidebar-link :href="route('seksi.permohonan.index')" :active="request()->routeIs('seksi.permohonan.*') || request()->routeIs('seksi.surat.*')">
         <x-slot:icon><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-3.5a1 1 0 00-.9.55l-.7 1.4a1 1 0 01-.9.55h-3a1 1 0 01-.9-.55l-.7-1.4a1 1 0 00-.9-.55H4" /></svg></x-slot:icon>
-        Permohonan Terbaru
-    </x-sidebar-link>
-    <x-sidebar-link :href="route('seksi.permohonan.daftar')" :active="request()->routeIs('seksi.permohonan.daftar')">
-        <x-slot:icon><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 5.25h16.5m-16.5 4.5h16.5m-16.5 4.5h16.5m-16.5 4.5h16.5" /></svg></x-slot:icon>
-        Daftar Permohonan
-    </x-sidebar-link>
-    <x-sidebar-link :href="route('seksi.layanan.index')" :active="request()->routeIs('seksi.layanan.*')">
-        <x-slot:icon><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" /></svg></x-slot:icon>
-        Daftar Layanan
+        Permohonan Seksi
     </x-sidebar-link>
 @elseif(Auth::user()->role === 'pimpinan')
-    <p class="sidebar-label mb-2 mt-6 flex items-center gap-1.5 px-3 text-xs font-bold uppercase tracking-wider text-emerald-700/80"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Monitoring</p>
+    <p class="sidebar-label mt-6 mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-slate-400">Monitoring</p>
     <x-sidebar-link :href="route('statistics.index')" :active="request()->routeIs('statistics.*')">
         <x-slot:icon><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg></x-slot:icon>
         Statistik
@@ -84,7 +72,7 @@
         Semua Permohonan
     </x-sidebar-link>
 @elseif(Auth::user()->role === 'pemohon')
-    <p class="sidebar-label mb-2 mt-6 flex items-center gap-1.5 px-3 text-xs font-bold uppercase tracking-wider text-emerald-700/80"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Layanan Saya</p>
+    <p class="sidebar-label mt-6 mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-slate-400">Layanan Saya</p>
     <x-sidebar-link :href="route('pemohon.permohonan.index')" :active="request()->routeIs('pemohon.permohonan.*')">
         <x-slot:icon><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-3.5a1 1 0 00-.9.55l-.7 1.4a1 1 0 01-.9.55h-3a1 1 0 01-.9-.55l-.7-1.4a1 1 0 00-.9-.55H4" /></svg></x-slot:icon>
         Permohonan Saya

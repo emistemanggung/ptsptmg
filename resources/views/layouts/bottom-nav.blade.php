@@ -10,12 +10,12 @@
         ],
         'petugas' => [
             ['route' => 'dashboard', 'active' => 'dashboard', 'label' => 'Beranda', 'icon' => 'home'],
-            ['route' => 'petugas.permohonan.index', 'active' => 'petugas.permohonan.index', 'label' => 'Terbaru', 'icon' => 'inbox'],
-            ['route' => 'petugas.permohonan.offline.index', 'active' => 'petugas.permohonan.offline.*', 'label' => 'Langsung', 'icon' => 'plus'],
+            ['route' => 'petugas.permohonan.index', 'active' => 'petugas.permohonan.index', 'label' => 'Permohonan', 'icon' => 'inbox'],
+            ['route' => 'petugas.permohonan.offline.index', 'active' => 'petugas.permohonan.offline.*', 'label' => 'Offline', 'icon' => 'plus'],
         ],
         'petugas_seksi' => [
             ['route' => 'dashboard', 'active' => 'dashboard', 'label' => 'Beranda', 'icon' => 'home'],
-            ['route' => 'seksi.permohonan.index', 'active' => 'seksi.permohonan.index', 'label' => 'Terbaru', 'icon' => 'inbox'],
+            ['route' => 'seksi.permohonan.index', 'active' => 'seksi.permohonan.*', 'label' => 'Permohonan', 'icon' => 'inbox'],
             ['route' => 'statistics.index', 'active' => 'statistics.*', 'label' => 'Statistik', 'icon' => 'chart'],
         ],
         'pimpinan' => [
